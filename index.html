@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Asistente de diagnóstico por síntomas</title>
+  <style>
+    :root{--bg:#0f172a;--panel:#111827;--card:#1f2937;--muted:#9ca3af;--text:#e5e7eb;--accent:#22c55e}
+    *{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#0b1022,#0f172a 40%,#0b1022);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Noto Sans,Ubuntu,Cantarell,Helvetica Neue,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    header{padding:24px 16px;border-bottom:1px solid #111827;background:rgba(17,24,39,.8);backdrop-filter:saturate(160%) blur(8px);position:sticky;top:0;z-index:20}
+    .wrap{max-width:1100px;margin:0 auto}
+    h1{margin:0;font-size:20px}
+    .grid{display:grid;gap:16px;grid-template-columns:320px 1fr;padding:16px}
+    .panel{background:var(--panel);border:1px solid #1f2937;border-radius:16px;padding:16px}
+    .section-title{font-weight:700;font-size:14px;letter-spacing:.02em;margin-bottom:8px}
+    label{font-size:12px;color:var(--muted);display:block;margin-bottom:6px}
+    input[type="text"], textarea, select{width:100%;background:#0b1220;color:var(--text);border:1px solid #243046;border-radius:10px;padding:10px 12px;font-size:14px}
+    textarea{min-height:72px;resize:vertical}
+    .chips{display:flex;flex-wrap:wrap;gap:8px}
+    .chip{background:#0b1220;border:1px solid #243046;color:var(--text);padding:6px 10px;border-radius:999px;font-size:12px;cursor:pointer}
+    .chip.active{border-color:var(--accent);box-shadow:0 0 0 2px rgba(34,197,94,.2) inset}
+    .btn{appearance:none;border:0;background:var(--accent);color:#052e16;padding:10px 14px;border-radius:12px;font-weight:700;cursor:pointer}
+    .btn.secondary{background:#0b1220;color:var(--text);border:1px solid #243046}
+    .results{display:grid;gap:12px}
+    .card{background:var(--card);border:1px solid #2b364f;border-radius:16px;padding:14px}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    .badge{font-size:11px;border:1px solid #2b364f;border-radius:999px;padding:3px 8px;color:#cbd5e1}
+    .score{margin-left:auto;font-weight:800}
+    .muted{color:var(--muted)}
+    details{border-top:1px dashed #334155;padding-top:10px;margin-top:8px}
+    .footer{opacity:.8;font-size:12px;margin-top:16px}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Asistente de diagnóstico por síntomas — Musculoesquelético & afines</h1>
+      <div class="muted" style="margin-top:6px">Escribe síntomas (o haz clic en chips), y obtén diagnósticos sugeridos con puntaje de coincidencia. Dataset cargado desde tu documento.</div>
+    </div>
+  </header>
+
+  <main class="wrap grid">
+    <!-- LADO IZQUIERDO: ENTRADAS -->
+    <section class="panel">
+      <div class="section-title">1) Síntomas del paciente</div>
+      <label for="symptoms">Ingresa síntomas separados por coma (ej.: dolor, rigidez matutina, parestesias)</label>
+      <textarea id="symptoms" placeholder="dolor, rigidez, debilidad..."></textarea>
+
+      <div class="section-title" style="margin-top:14px">Sugerencias rápidas</div>
+      <div id="chips" class="chips"></div>
+
+      <div class="two" style="margin-top:14px">
+        <div>
+          <label for="system">Sistema</label>
+          <select id="system">
+            <option value="">Todos</option>
+            <option>Musculoesquelético</option>
+            <option>Neurológicos</option>
+            <option>Otros</option>
+          </select>
+        </div>
+        <div>
+          <label for="minScore">Puntaje mínimo (%)</label>
+          <input id="minScore" type="text" value="20"/>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <button class="btn" id="btnRun">Sugerir diagnóstico</button>
+        <button class="btn secondary" id="btnClear">Limpiar</button>
+      </div>
+
+      <details style="margin-top:14px">
+        <summary><strong>¿Cómo funciona?</strong></summary>
+        <div class="muted" style="margin-top:6px;font-size:13px">
+          • Se tokenizan los síntomas ingresados y se comparan con los síntomas de cada enfermedad.
+          • Coincidencia parcial y exacta por palabras clave (ignorando mayúsculas/acentos).<br/>
+          • Puntaje = coincidencias / total de palabras clave del diagnóstico (ponderado por categorías).
+        </div>
+      </details>
+    </section>
+
+    <!-- LADO DERECHO: RESULTADOS -->
+    <section class="panel">
+      <div class="section-title">Resultados</div>
+      <div class="muted" style="margin-bottom:10px">Ordenados por mayor puntaje de coincidencia. Haz clic para ver detalles.</div>
+      <div id="results" class="results"></div>
+      <div class="footer muted">Uso académico. No sustituye evaluación clínica.</div>
+    </section>
+  </main>
+
+  <script>
+    // Utilidad para normalizar texto (minúsculas, sin tildes)
+    function norm(s){
+      return (s||"")
+        .toString()
+        .toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9áéíóúñü\s,.-]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    // Dataset basado en tu documento (resumido y estructurado)
+    // Cada entrada: enfermedad, sistema, sintomas (array), neurologicos (array), otros (array), codigos (array), definicion (string)
+    const DATA = [
+      {
+        enfermedad:"Artritis reumatoide de la mano",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor","rigidez matutina","inflamacion simetrica","deformidades en cuello de cisne","deformidades boutonniere","fatiga"],
+        neurologicos:["parestesias"],
+        otros:["limitacion funcional grave","fatiga"],
+        codigos:["M06.00","M06.01","M06.02"],
+        definicion:"Enfermedad autoinmune inflamatoria crónica que afecta la membrana sinovial de las articulaciones de la mano."
+      },
+      {
+        enfermedad:"Artrosis de cadera",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor en cadera","rigidez","limitacion para caminar","dificultad para subir escaleras"],
+        neurologicos:[], otros:["dificultad para vestirse","alteracion del sueno"],
+        codigos:["M16.10","M16.11","M16.12","M16.7","M16.50","M16.51","M16.52"],
+        definicion:"Artropatía degenerativa femoroacetabular con pérdida de cartílago y osteofitos."
+      },
+      {
+        enfermedad:"Artrosis de la mano",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor","rigidez","nodulos de heberden","nodulos de bouchard"],
+        neurologicos:[], otros:["limitacion de la funcion manual","motricidad fina"],
+        codigos:["M19.041","M19.042","M19.049","M19.031","M19.032","M19.039"],
+        definicion:"Degeneración del cartílago articular en interfalángicas y trapeciometacarpiana."
+      },
+      {
+        enfermedad:"Artrosis de rodilla",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor al caminar","rigidez","deformidades","genu varo","genu valgo"],
+        neurologicos:[], otros:["dificultad para levantarse","alteracion de la marcha"],
+        codigos:["M17.0","M17.10","M17.11","M17.12","M17.4","M17.5"],
+        definicion:"Degeneración articular crónica de la rodilla afectando cartílago, hueso y ligamentos."
+      },
+      {
+        enfermedad:"Capsulitis adhesiva (hombro congelado)",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor","rigidez progresiva","limitacion de movilidad"],
+        neurologicos:[], otros:["dificultad para vestir","peinarse","dormir sobre el lado afectado"],
+        codigos:["M75.00","M75.01","M75.02"],
+        definicion:"Restricción idiopática, progresiva y dolorosa de la movilidad del hombro; suele autolimitarse en 1–2 años."
+      },
+      {
+        enfermedad:"Contractura de Dupuytren",
+        sistema:"Musculoesquelético",
+        sintomas:["nodulos en palma","retraccion digital","limitacion de extension"],
+        neurologicos:[], otros:["dificultad para sujetar objetos","progresion cronica"],
+        codigos:["M72.0"],
+        definicion:"Fibrosis progresiva de la aponeurosis palmar con flexión permanente de dedos (anular, meñique)."
+      },
+      {
+        enfermedad:"Enfermedad degenerativa cervical",
+        sistema:"Musculoesquelético",
+        sintomas:["rigidez","dolor cervical","limitacion extension"],
+        neurologicos:["deficits motores","deficits sensitivos","dolor radicular"],
+        otros:["alteracion postural","limitacion en actividades"],
+        codigos:["M47.12","M47.13","M48.02","M48.03","M50.00","M50.03","M50.30","M50.33","M50.32","M54.2"],
+        definicion:"Cambios en discos, vértebras y articulaciones cervicales con dolor axial o radicular."
+      },
+      {
+        enfermedad:"Enfermedad degenerativa lumbar (lumbalgia)",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor lumbar","rigidez","dificultad para inclinarse","dificultad para caminar"],
+        neurologicos:[], otros:["ansiedad","depresion por incapacidad"],
+        codigos:["M47.817","M47.899","M51.36","M51.37","M54.5"],
+        definicion:"Proceso degenerativo lumbar que genera dolor e inestabilidad."
+      },
+      {
+        enfermedad:"Epicondilitis (codo de tenista)",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor en codo lateral","debilidad de prension","dolor al extender muneca"],
+        neurologicos:[], otros:["dificultad para dar la mano","usar teclado","deportes"],
+        codigos:["M77.10","M77.11","M77.12"],
+        definicion:"Inflamación/degeneración del origen tendinoso de extensores en epicóndilo lateral."
+      },
+      {
+        enfermedad:"Epitrocleitis (codo de golfista)",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor medial en codo","limitacion para flexionar muneca"],
+        neurologicos:[], otros:["dolor con movimientos repetitivos"],
+        codigos:["M77.00","M77.01","M77.02"],
+        definicion:"Lesión inflamatoria-degenerativa en el origen de flexores del antebrazo, en la epitróclea."
+      },
+      {
+        enfermedad:"Espondilolisis/espondilolistesis lumbar",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor lumbar","inestabilidad","limitacion de movilidad"],
+        neurologicos:["parestesias","paralisis"],
+        otros:["riesgo de gangrena","insuficiencia renal (mioglobinuria)"],
+        codigos:["M43.07","Q76.2","M43.10","S33.100"],
+        definicion:"Defecto óseo (espondilólisis) o desplazamiento vertebral (espondilolistesis)."
+      },
+      {
+        enfermedad:"Fibromialgia",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor difuso","rigidez matutina","fatiga cronica"],
+        neurologicos:["fibroniebla","ansiedad","depresion","alteraciones del sueno"],
+        otros:["fatiga","estres psicosocial","insomnio"],
+        codigos:["M79.7"],
+        definicion:"Síndrome de dolor crónico generalizado (≥3 meses) con sensibilización central."
+      },
+      {
+        enfermedad:"Lesiones meniscales",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor","limitacion de movilidad","bloqueo articular"],
+        neurologicos:[], otros:["dificultad para deambular"],
+        codigos:["M23.300","M23.309","S83.251","S83.259","M23.349","M23.351"],
+        definicion:"Alteraciones del menisco (traumáticas o degenerativas)."
+      },
+      {
+        enfermedad:"Lesiones por esfuerzos repetitivos (LER)",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor regional cronico","fatiga muscular","miositis","limitacion de fuerza"],
+        neurologicos:[], otros:["estres laboral","disminucion de productividad"],
+        codigos:["M79.641","M79.642","M79.643","M79.609","G70.9","M60.9"],
+        definicion:"Dolor inespecífico por microtraumatismos repetidos en MMSS."
+      },
+      {
+        enfermedad:"Radiculopatía cervical",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor cervical irradiado al brazo"],
+        neurologicos:["perdida de sensibilidad en dedos","debilidad muscular","alteracion de reflejos"],
+        otros:[],
+        codigos:["M54.12","M54.13"],
+        definicion:"Disfunción de raíz nerviosa cervical con dolor irradiado y déficits."
+      },
+      {
+        enfermedad:"Rotura anteroposterior labral superior (SLAP)",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor en hombro al levantar","empujar","lanzar"],
+        neurologicos:[], otros:["intolerancia al ejercicio","disminucion capacidad funcional"],
+        codigos:["S43.431","S43.432","S43.439","M75.80","M75.82"],
+        definicion:"Lesión del labrum glenoideo superior que afecta la inserción del bíceps."
+      },
+      {
+        enfermedad:"Rotura del manguito de los rotadores",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor al elevar el brazo >90","debilidad","limitacion de autocuidado"],
+        neurologicos:[], otros:["limitacion en actividades por encima de la cabeza"],
+        codigos:["M75.100","M75.101","M75.102","M75.80","M75.81","M75.82"],
+        definicion:"Lesión parcial o completa de tendones supra/infraespinoso o redondo menor."
+      },
+      {
+        enfermedad:"Síndrome compartimental de la pierna",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor intenso desproporcionado","rigidez","debilidad"],
+        neurologicos:["parestesias","paralisis"],
+        otros:["riesgo de necrosis"],
+        codigos:["M69.9","T79.A0","T79.A2"],
+        definicion:"Aumento de presión en compartimiento muscular que compromete perfusión."
+      },
+      {
+        enfermedad:"Síndrome del piramidal",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor gluteo irradiado"],
+        neurologicos:["ciatalgia","parestesias"],
+        otros:[],
+        codigos:["M25.551","M25.552","M25.559","M79.1"],
+        definicion:"Compresión del nervio ciático por el músculo piriforme."
+      },
+      {
+        enfermedad:"Síndrome del túnel del carpo",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor en muneca irradiado al brazo"],
+        neurologicos:["parestesias nocturnas","debilidad de prension","perdida de sensibilidad en pulgar indice medio"],
+        otros:["dificultad para actividades manuales finas"],
+        codigos:["G56.00","G56.01","G56.02"],
+        definicion:"Compresión del nervio mediano en el túnel carpiano."
+      },
+      {
+        enfermedad:"Tendinopatía de Aquiles",
+        sistema:"Musculoesquelético",
+        sintomas:["dolor en talon","dolor en tobillo","rigidez matutina","engrosamiento tendinoso"],
+        neurologicos:[], otros:["dificultad para correr saltar caminar largas distancias"],
+        codigos:["M76.60","M76.61","M76.62"],
+        definicion:"Degeneración y microlesiones del tendón de Aquiles por sobreuso."
+      },
+      {
+        enfermedad:"Vértigo cervicógeno",
+        sistema:"Neurológicos",
+        sintomas:["mareo","vertigo","desequilibrio","dolor cervical","rigidez"],
+        neurologicos:[], otros:["ansiedad","insomnio","dificultad para conducir"],
+        codigos:["M54.2","R42"],
+        definicion:"Sensación de movimiento falso por disfunción musculoesquelética cervical."
+      },
+      {
+        enfermedad:"Síndrome de dolor crónico",
+        sistema:"Otros",
+        sintomas:["dolor persistente","dolor de espalda","dolor articular","limitacion funcional"],
+        neurologicos:["dolor neuropatico","hipersensibilidad","trastornos del animo"],
+        otros:["fatiga","estres psicosocial","ansiedad","depresion","insomnio"],
+        codigos:["G89.4","G89.29"],
+        definicion:"Dolor ≥6 meses más allá del tiempo normal de curación; multifactorial."
+      },
+      {
+        enfermedad:"Artroplastia total de rodilla (postoperatorio)",
+        sistema:"Otros",
+        sintomas:["dolor de rodilla","limitacion severa para caminar","autocuidado"],
+        neurologicos:[], otros:[],
+        codigos:["M17.10","M17.11","M17.12","M17.5"],
+        definicion:"Procedimiento quirúrgico que reemplaza la articulación de la rodilla por artrosis avanzada."
+      }
+    ];
+
+    // Chips de síntomas más comunes (extraídos del dataset)
+    const COMMON_SYMPTOMS = Array.from(new Set(
+      DATA.flatMap(d => [...d.sintomas, ...(d.neurologicos||[]), ...(d.otros||[])])
+    )).filter(s => s.length >= 5).slice(0, 40); // limitar para UI
+
+    // Render chips
+    const chipsEl = document.getElementById('chips');
+    COMMON_SYMPTOMS.forEach(s => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = s; b.className = 'chip';
+      b.addEventListener('click',()=>{
+        b.classList.toggle('active');
+        collectChipsToTextarea();
+      });
+      chipsEl.appendChild(b);
+    });
+
+    function collectChipsToTextarea(){
+      const active = Array.from(document.querySelectorAll('.chip.active')).map(c=>c.textContent);
+      const manual = document.getElementById('symptoms').value.split(',').map(v=>v.trim()).filter(Boolean);
+      const merged = Array.from(new Set([...manual, ...active]));
+      document.getElementById('symptoms').value = merged.join(', ');
+    }
+
+    document.getElementById('btnClear').addEventListener('click',()=>{
+      document.getElementById('symptoms').value = '';
+      document.querySelectorAll('.chip.active').forEach(c=>c.classList.remove('active'));
+      render([]);
+    });
+
+    document.getElementById('btnRun').addEventListener('click',()=>run());
+
+    function tokenize(text){
+      return norm(text).split(/[,\s]+/).filter(t=>t && t.length>2);
+    }
+
+    function scoreEntry(entry, tokens){
+      const dict = new Set([
+        ...entry.sintomas.map(norm),
+        ...(entry.neurologicos||[]).map(norm),
+        ...(entry.otros||[]).map(norm)
+      ].flatMap(s=>s.split(/[,\s]+/).filter(Boolean)));
+
+      let hits = 0;
+      tokens.forEach(t=>{ if (Array.from(dict).some(w=>w===t || (w.length>=5 && w.includes(t)))) hits++; });
+
+      const denom = Math.max(1, dict.size*0.6); // suavizado
+      let score = Math.min(1, hits/denom);
+      return score;
+    }
+
+    function run(){
+      const system = document.getElementById('system').value;
+      const minScore = Math.max(0, Math.min(100, parseFloat(document.getElementById('minScore').value)||0))/100;
+      const tokens = tokenize(document.getElementById('symptoms').value);
+
+      const results = DATA
+        .filter(d => !system || d.sistema===system)
+        .map(d => ({
+          ...d,
+          score: scoreEntry(d, tokens)
+        }))
+        .filter(r => r.score >= minScore)
+        .sort((a,b)=>b.score-a.score)
+        .slice(0, 20);
+
+      render(results);
+    }
+
+    function render(list){
+      const box = document.getElementById('results');
+      box.innerHTML = '';
+      if (!list || list.length===0){
+        const empty = document.createElement('div');
+        empty.className = 'muted';
+        empty.textContent = 'Sin resultados. Ajusta los síntomas o baja el puntaje mínimo.';
+        box.appendChild(empty);
+        return;
+      }
+      list.forEach(item=>{
+        const card = document.createElement('div');
+        card.className = 'card';
+        const pct = Math.round(item.score*100);
+        card.innerHTML = `
+          <div class="row">
+            <div><strong>${item.enfermedad}</strong></div>
+            <span class="badge">${item.sistema}</span>
+            <span class="badge">Códigos: ${item.codigos.join(', ')}</span>
+            <div class="score">${pct}%</div>
+          </div>
+          <details>
+            <summary>Ver detalles</summary>
+            <div style="margin-top:8px">
+              <div class="muted">Definición</div>
+              <div>${item.definicion}</div>
+              <div class="muted" style="margin-top:8px">Síntomas</div>
+              <div>${item.sintomas.join(', ')}</div>
+              ${item.neurologicos?.length?`<div class="muted" style="margin-top:8px">Neurológicos</div><div>${item.neurologicos.join(', ')}</div>`:''}
+              ${item.otros?.length?`<div class="muted" style="margin-top:8px">Otros</div><div>${item.otros.join(', ')}</div>`:''}
+            </div>
+          </details>
+        `;
+        box.appendChild(card);
+      });
+    }
+  </script>
+</body>
+</html>
